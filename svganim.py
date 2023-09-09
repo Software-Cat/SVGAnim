@@ -1,10 +1,13 @@
 from abc import ABC, abstractmethod
-from collections import defaultdict
-import random
 from typing import Any, Callable, Optional, Self, TypeVar, Generic
-import drawsvg as draw
-
 from dataclasses import dataclass
+
+import collections
+import math
+import random
+import drawsvg as draw
+import itertools
+import collision
 
 T = TypeVar("T")
 
@@ -27,15 +30,90 @@ class Vector:
         return Vector(self.x / other, self.y / other)
 
     def __neg__(self):
-        return self * -1
+        return Vector(-self.x, -self.y)
 
-    def mag(self):
-        """Magnitude"""
-        return (self.x**2 + self.y**2) ** 0.5
+    def __eq__(self, other: Any):
+        if not isinstance(other, Vector):
+            return False
+        return self.x == other.x and self.y == other.y
 
-    def norm(self):
-        """Normalized"""
-        return self / self.mag()
+    def __ne__(self, other: Any):
+        if not isinstance(other, Vector):
+            return True
+        return self.x != other.x or self.y != other.y
+
+    def __getitem__(self, index: int):
+        return [self.x, self.y][index]
+
+    def __contains__(self, value):
+        return value == self.x or value == self.y
+
+    def __len__(self):
+        return 2
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __str__(self):
+        return f"Vector{{{self.x}, {self.y}}}]"
+
+    def copy(self):
+        return Vector(self.x, self.y)
+
+    def perp(self):
+        return Vector(self.y, -self.x)
+
+    def rotate(self, angle: float):
+        return Vector(
+            self.x * math.cos(angle) - self.y * math.sin(angle),
+            self.x * math.sin(angle) + self.y * math.cos(angle),
+        )
+
+    def reverse(self):
+        return Vector(-self.x, -self.y)
+
+    def normalize(self):
+        dot = self.magnitude()
+        return self / dot
+
+    def project(self, other: Self):
+        amt = self.dot(other) / other.magnitudeSquared()
+
+        return Vector(amt * other.x, amt * other.y)
+
+    def projectN(self, other: Self):
+        amt = self.dot(other)
+
+        return Vector(amt * other.x, amt * other.y)
+
+    def reflect(self, axis: Self):
+        v = Vector(self.x, self.y)
+        v = v.project(axis) * 2
+        v = -v
+
+        return v
+
+    def reflect_n(self, axis: Self):
+        v = Vector(self.x, self.y)
+        v = v.projectN(axis) * 2
+        v = -v
+
+        return v
+
+    def dot(self, other: Self):
+        return self.x * other.x + self.y * other.y
+
+    def magnitudeSquared(self):
+        return self.dot(self)
+
+    def magnitude(self):
+        return math.sqrt(self.magnitudeSquared())
+
+    def matrixprod(self, other: Self):
+        return Vector(self.x * other.x, self.y * other.y)
+
+    def toCollisionVec(self):
+        return collision.Vector(self.x, self.y)
 
 
 @dataclass(frozen=True)
@@ -49,6 +127,19 @@ class Transform:
 
     def rotate(self, delta: float):
         return Transform(self.pos, self.rot + delta, self.scale)
+
+    def scaleAdd(self, delta: Vector):
+        return Transform(self.pos, self.rot, self.scale + delta)
+
+    def scaleMult(self, multiplier: Vector):
+        return Transform(self.pos, self.rot, self.scale.matrixprod(multiplier))
+
+    def apply(self, other: Self):
+        return Transform(
+            other.pos + self.pos,
+            other.rot + self.rot,
+            other.scale.matrixprod(self.scale),
+        )
 
 
 class Behavior(ABC):
@@ -85,7 +176,7 @@ class Timeline(ABC, Generic[T]):
     ) -> None:
         self.attributeName = attributeName
         self.animationClass = animationClass
-        self.keyframes: dict[float, T] = defaultdict()
+        self.keyframes: dict[float, T] = collections.defaultdict()
         self.initialDefault = initialDefault
         self.kwargs = kwargs
 
@@ -97,10 +188,14 @@ class Timeline(ABC, Generic[T]):
         del self.keyframes[time]
 
     @abstractmethod
-    def timestampRepr(self, value: T) -> str:
-        pass
+    def timestampRepr(self, key: float, value: T) -> str:
+        return str(value)
 
-    def toAnimations(self, duration: float = -1) -> list[draw.Animate]:
+    def toAnimations(
+        self,
+        mesh: "Mesh",
+        duration: float = -1,
+    ) -> list[draw.Animate]:
         # Filling first frame with default value
         if not 0 in self.keyframes.keys():
             if self.initialDefault == None:
@@ -116,7 +211,7 @@ class Timeline(ABC, Generic[T]):
         durFloat = max(self.keyframes.keys())
         dur = f"{str(durFloat)}s"
         items = sorted(self.keyframes.items())
-        values = ";".join(self.timestampRepr(v) for k, v in items)
+        values = ";".join(self.timestampRepr(k, v) for k, v in items)
         if durFloat == 0:
             keyTimes = "0"
         else:
@@ -136,8 +231,13 @@ class Timeline(ABC, Generic[T]):
             )
         ]
 
-    def extendAnimations(self, shape: draw.DrawingBasicElement, duration: float = -1):
-        shape.extend_anim(self.toAnimations(duration))
+    def extendAnimations(
+        self,
+        shape: draw.DrawingBasicElement,
+        mesh: "Mesh",
+        duration: float = -1,
+    ):
+        shape.extend_anim(self.toAnimations(mesh, duration=duration))
 
 
 class VectorTimeline(Timeline[Vector]):
@@ -149,43 +249,29 @@ class VectorTimeline(Timeline[Vector]):
             additive=additive,
         )
 
-    def timestampRepr(self, value: Vector) -> str:
+    def timestampRepr(self, key: float, value: Vector) -> str:
         return f"{value.x},{value.y}"
 
 
 class FloatTimeline(Timeline[float]):
-    def timestampRepr(self, value: Vector) -> str:
+    def timestampRepr(self, key: float, value: float) -> str:
         return str(value)
 
 
-class BoolTimeline(Timeline[bool]):
+class MappedTimeline(Timeline[T]):
     def __init__(
         self,
         attributeName: str,
-        mapping: dict[bool, str],
+        mapping: dict[T, str],
         animationClass: type[draw.Animate] = draw.Animate,
-        initialDefault: bool | None = None,
+        initialDefault: Optional[T] = None,
         **kwargs: str,
     ) -> None:
         super().__init__(attributeName, animationClass, initialDefault, **kwargs)
         self.mapping = mapping
 
-    def timestampRepr(self, value: bool) -> str:
+    def timestampRepr(self, key: float, value: T) -> str:
         return self.mapping[value]
-
-
-# class RotationTimeline(FloatTimeline):
-#     def __init__(
-#         self,
-#         initialDefault: Optional[float] = None,
-#         **kwargs: str,
-#     ) -> None:
-#         super().__init__(
-#             "transform",
-#             animationClass=draw.AnimateTransform,
-#             initialDefault=initialDefault,
-#             **kwargs,
-#         )
 
 
 class TransformTimeline(Timeline[Transform]):
@@ -194,6 +280,7 @@ class TransformTimeline(Timeline[Transform]):
         self.rotTimeline = FloatTimeline(
             "transform",
             animationClass=draw.AnimateTransform,
+            initialDefault=0,
             type="rotate",
             additive="sum",
         )
@@ -209,22 +296,24 @@ class TransformTimeline(Timeline[Transform]):
         self.rotTimeline.removeKeyframe(time)
         self.scaleTimeline.removeKeyframe(time)
 
-    def toAnimations(self, duration: float = -1) -> list[draw.Animate]:
+    def toAnimations(self, mesh: "Mesh", duration: float = -1) -> list[draw.Animate]:
         return (
-            self.posTimeline.toAnimations(duration)
-            + self.rotTimeline.toAnimations(duration)
-            + self.scaleTimeline.toAnimations(duration)
+            self.posTimeline.toAnimations(mesh, duration)
+            + self.rotTimeline.toAnimations(mesh, duration)
+            + self.scaleTimeline.toAnimations(mesh, duration)
         )
 
-    def timestampRepr(self, value: Transform) -> str:
+    def timestampRepr(self, key: float, value: Transform) -> str:
         return ""
 
 
-class Mesh(Behavior):  # Todo: implement color timeline track
-    def __init__(self, ownerActor: "Actor", centerOfMass: Vector) -> None:
+class Mesh(Behavior):
+    def __init__(
+        self,
+        ownerActor: "Actor",
+    ) -> None:
         """Center of mass expressed in local coordinates"""
         super().__init__(ownerActor)
-        self.centerOfMass = centerOfMass
 
     def start(self):
         return super().start()
@@ -238,44 +327,80 @@ class Mesh(Behavior):  # Todo: implement color timeline track
 
 
 class EllipseMesh(Mesh):
-    def render(self) -> Optional[draw.DrawingElement]:
+    def __init__(self, ownerActor: "Actor", rx: float = 100, ry: float = 100) -> None:
+        super().__init__(ownerActor)
+        self.rx = rx
+        self.ry = ry
+
+    def render(self) -> draw.DrawingElement:
         ellipse = draw.Ellipse(
             0,
             0,
-            1,
-            1,
+            self.rx,
+            self.ry,
         )
 
         self.owner.lifecycleTimeline.extendAnimations(
-            ellipse, self.owner.world.simulationUpTo
+            ellipse, self, self.owner.world.simulationUpTo
         )
-        self.owner.transformTimeline.extendAnimations(
-            ellipse, self.owner.world.simulationUpTo
+        self.owner.absoluteTransformTimeline.extendAnimations(
+            ellipse, self, self.owner.world.simulationUpTo
         )
 
         return ellipse
 
 
-class RectangleMesh(Mesh):
-    def render(self) -> Optional[draw.DrawingElement]:
-        rect = draw.Rectangle(0, 0, 1, 1)
+class PolyMesh(Mesh):
+    def __init__(
+        self,
+        ownerActor: "Actor",
+        points: list[Vector],
+        centerOfMass: Vector = Vector(0, 0),
+    ) -> None:
+        super().__init__(ownerActor)
+        self.points = [p - centerOfMass for p in points]
+
+    def render(self) -> draw.DrawingElement:
+        poly = draw.Lines(
+            *itertools.chain.from_iterable((p.x, p.y) for p in self.points),
+            close=True,
+        )
 
         self.owner.lifecycleTimeline.extendAnimations(
-            rect, self.owner.world.simulationUpTo
+            poly, self, self.owner.world.simulationUpTo
         )
-        self.owner.transformTimeline.extendAnimations(
-            rect, self.owner.world.simulationUpTo
+        self.owner.absoluteTransformTimeline.extendAnimations(
+            poly, self, self.owner.world.simulationUpTo
         )
 
-        return rect
+        return poly
+
+
+class RectMesh(PolyMesh):
+    def __init__(
+        self,
+        ownerActor: "Actor",
+        width: float,
+        height: float,
+    ) -> None:
+        super().__init__(
+            ownerActor,
+            [Vector(0, 0), Vector(width, 0), Vector(width, height), Vector(0, height)],
+            Vector(width / 2, height / 2),
+        )
 
 
 class Actor:
-    def __init__(self, transform: Transform, world: "World") -> None:
-        self.transform: Transform = transform
+    def __init__(
+        self,
+        relativeTransform: Transform,
+        world: "World",
+        parent: Optional[Self] = None,
+    ) -> None:
+        self.relativeTransform: Transform = relativeTransform
         self.world: World = world
-        self.transformTimeline = TransformTimeline()
-        self.lifecycleTimeline = BoolTimeline(
+        self.absoluteTransformTimeline = TransformTimeline()
+        self.lifecycleTimeline = MappedTimeline(
             "visibility",
             mapping={False: "hidden", True: "visible"},
             initialDefault=False,
@@ -283,32 +408,61 @@ class Actor:
         self.coroutines: list[Coroutine] = []
         self.components: list[Behavior] = []
 
+        self.children: list[Actor] = []
+        self.parent: Optional[Actor] = parent
+        if self.parent:
+            self.parent.children.append(self)
+
+    def getAbsoluteTransform(self) -> Transform:
+        transChain = [self.relativeTransform]
+        next = self.parent
+        while next:
+            transChain.insert(0, next.relativeTransform)
+            next = next.parent
+
+        absoluteTrans = self.world.sceneGraph.relativeTransform
+        for item in transChain:
+            absoluteTrans = absoluteTrans.apply(item)
+        return absoluteTrans
+
     def start(self):
         for behavior in self.components:
             behavior.start()
+        for child in self.children:
+            child.start()
         self.lifecycleTimeline.addKeyframe(self.world.time, True)
 
     def onDestroy(self):
+        for child in self.children:
+            child.onDestroy()
         # Subtraction is a magic correction, not sure why it works but it just does.
-        self.lifecycleTimeline.addKeyframe(
-            self.world.time - self.world.deltaTime * 2, False
-        )
+        self.lifecycleTimeline.addKeyframe(self.world.time, False)
 
     def update(self, deltaTime: float):
         for behavior in self.components:
             behavior.update(deltaTime)
         for c in self.coroutines:
             c.systemUpdate(self.world.deltaTime)
+        for child in self.children:
+            child.update(deltaTime)
 
     def lateUpdate(self, deltaTime: float):
         for behavior in self.components:
             behavior.lateUpdate(deltaTime)
-        self.transformTimeline.addKeyframe(self.world.time, self.transform)
+        for child in self.children:
+            child.lateUpdate(deltaTime)
+        self.absoluteTransformTimeline.addKeyframe(
+            self.world.time, self.getAbsoluteTransform()
+        )
 
-    def render(self) -> Optional[draw.DrawingElement]:
+    def render(self) -> list[Optional[draw.DrawingElement]]:
+        shapes = []
         for comp in self.components:
             if isinstance(comp, Mesh):
-                return comp.render()
+                shapes.append(comp.render())
+        for child in self.children:
+            shapes.extend(child.render())
+        return shapes
 
     def startCoroutine(self, cor: "Coroutine", initialDelay: float = 0) -> "Coroutine":
         cor.waitTime = initialDelay
@@ -336,10 +490,12 @@ class PrefabFactory:
     def __init__(
         self,
         *behaviorParams: tuple[type[Behavior], dict[str, Any]],
-        defaultTransform: Transform,
+        defaultTransform: Transform = Transform(),
+        children: list[Self] = [],
     ) -> None:
         self.behaviorParams = behaviorParams
         self.defaultTransform = defaultTransform
+        self.childFactories = children
 
     def build(
         self,
@@ -347,6 +503,7 @@ class PrefabFactory:
         posOverride: Optional[Vector] = None,
         rotOverride: Optional[float] = None,
         scaleOverride: Optional[Vector] = None,
+        parent: Optional[Actor] = None,
     ) -> Actor:
         transform = self.defaultTransform
 
@@ -357,10 +514,15 @@ class PrefabFactory:
         if scaleOverride:
             transform = Transform(transform.pos, transform.rot, scaleOverride)
 
-        newActor = Actor(transform, world)
+        newActor = Actor(transform, world, parent)
         for comp, params in self.behaviorParams:
             compInst = comp(newActor, **params)
             newActor.components.append(compInst)
+
+        for cf in self.childFactories:
+            child = cf.build(world, parent=newActor)
+            newActor.children.append(child)
+
         return newActor
 
 
@@ -368,23 +530,24 @@ class World:
     def __init__(self, width=800, height=800, deltaTime=0.1, gravity=Vector(0, 1)):
         self.time: float = 0
         self.deltaTime = deltaTime
-        self.simulatingActors: list[Actor] = []
-        self.destroyedActors: list[Actor] = []
         self.drawing = None
         self.simulationUpTo = -1
         self.width = width
         self.height = height
 
+        self.sceneGraph = Actor(Transform(), self, None)
+        self.destroyedGraph = Actor(Transform(), self, None)
+
     def destroyActor(self, actor: Actor):
-        a = self.simulatingActors[self.simulatingActors.index(actor)]
-        a.onDestroy()
-        self.simulatingActors.remove(a)
-        self.destroyedActors.append(a)
+        if actor.parent:
+            actor.parent.children.remove(actor)
+        actor.onDestroy()
+        self.destroyedGraph.children.append(actor)
 
     def placeBuiltActor(self, actor: Actor):
         """Places actor already instantiated from factory into the world"""
         actor.start()
-        self.simulatingActors.append(actor)
+        self.sceneGraph.children.append(actor)
         return actor
 
     def placeActorFromPrefab(
@@ -393,28 +556,26 @@ class World:
         posOverride: Optional[Vector] = None,
         rotOverride: Optional[float] = None,
         scaleOverride: Optional[Vector] = None,
+        parent: Optional[Actor] = None,
     ):
         """Places actor already instantiated from factory into the world"""
-        return self.placeBuiltActor(
-            factory.build(self, posOverride, rotOverride, scaleOverride)
-        )
+        newActor = factory.build(self, posOverride, rotOverride, scaleOverride)
+        newActor.parent = parent if parent else self.sceneGraph
+        return self.placeBuiltActor(newActor)
 
     def start(self):
-        for actor in self.simulatingActors:
-            actor.lateUpdate(self.deltaTime)
+        self.sceneGraph.lateUpdate(0)
 
-    def update(self):
+    def tick(self):
         self.time += self.deltaTime
-        for actor in self.simulatingActors:
-            actor.update(self.deltaTime)
-        for actor in self.simulatingActors:
-            actor.lateUpdate(self.deltaTime)
+        self.sceneGraph.update(self.deltaTime)
+        self.sceneGraph.lateUpdate(self.deltaTime)
 
     def simulateTo(self, endTime: float):
         self.time = 0
         self.start()
         while self.time < endTime:
-            self.update()
+            self.tick()
         self.simulationUpTo = self.time
 
     def render(self, filename: str):
@@ -434,42 +595,41 @@ class World:
             ),
         )
 
-        shapes = (
-            actor.render() for actor in self.simulatingActors + self.destroyedActors
-        )
+        shapes = self.sceneGraph.render() + self.destroyedGraph.render()
         for shape in shapes:
             self.drawing.append(shape)
         self.drawing.save_svg(filename)
 
 
-class Collider(ABC):
-    def __init__(self, owner: Actor, callback: Callable[[Self], None]) -> None:
-        self.owner = owner
-        self.callback = callback
+# Todo: implement colliders
+# class Collider(Behavior):
+#     def __init__(self, owner: Actor, callback: Callable[[Self], None]) -> None:
+#         self.owner = owner
+#         self.callback = callback
 
-    @abstractmethod
-    def checkCollision(self, other: Self) -> bool:
-        pass
-
-
-class CircleCollider(Collider):
-    def __init__(self, radius, *args) -> None:
-        super().__init__(*args)
-        self.radius = radius
-
-    def checkCollision(self, other: Collider) -> bool:
-        if isinstance(other, CircleCollider):
-            centerDist = (
-                (self.owner.transform.pos.x - other.owner.transform.pos.x) ** 2
-                + (self.owner.transform.pos.y - other.owner.transform.pos.y) ** 2
-            ) ** 0.5
-            radiusSep = self.radius + other.radius
-            return centerDist <= radiusSep
-        raise NotImplementedError()
+#     @abstractmethod
+#     def checkCollision(self, other: Self) -> bool:
+#         pass
 
 
-class BoxCollider(Collider):
-    pass
+# class EllipseCollider(Collider):
+#     def __init__(self, radius, *args) -> None:
+#         super().__init__(*args)
+#         self.radius = radius
+
+#     def checkCollision(self, other: Collider) -> bool:
+#         if isinstance(other, EllipseCollider):
+#             centerDist = (
+#                 (self.owner.transform.pos.x - other.owner.transform.pos.x) ** 2
+#                 + (self.owner.transform.pos.y - other.owner.transform.pos.y) ** 2
+#             ) ** 0.5
+#             radiusSep = self.radius + other.radius
+#             return centerDist <= radiusSep
+#         raise NotImplementedError()
+
+
+# class RectangleCollider(Collider):
+#     pass
 
 
 class Coroutine:

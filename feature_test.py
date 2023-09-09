@@ -3,21 +3,35 @@ from svganim import *
 
 class Mover(Behavior):
     def update(self, deltaTime: float):
-        self.owner.transform = self.owner.transform.translate(
-            Vector(1, 1) * 0 * deltaTime
-        ).rotate(100 * deltaTime)
+        self.owner.relativeTransform = (
+            self.owner.relativeTransform.translate(Vector(1, 1) * 0 * deltaTime)
+            .rotate(100 * deltaTime * 1)
+            .scaleAdd(Vector(1, 1) * 1 * deltaTime)
+        )
 
 
 rectPrefab = PrefabFactory(
-    (RectangleMesh, {"centerOfMass": Vector(25, 12.5)}),
+    (
+        RectMesh,
+        {"width": 100, "height": 200},
+    ),
+)
+
+trianglePrefab = PrefabFactory(
+    (
+        PolyMesh,
+        {
+            "centerOfMass": Vector(100, 100),
+            "points": [Vector(0, 0), Vector(200, 0), Vector(200, 200)],
+        },
+    ),
     (Mover, {}),
-    defaultTransform=Transform(Vector(-100, -100), scale=Vector(50, 25)),
+    children=[rectPrefab],
 )
 
 
-world = World(deltaTime=0.05)
-world.placeActorFromPrefab(rectPrefab, None)
-
+world = World(deltaTime=1 / 24)
+world.placeActorFromPrefab(trianglePrefab)
 
 world.simulateTo(10)
 world.render("test.svg")

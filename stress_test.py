@@ -5,7 +5,7 @@ from svganim import *
 class Mover(Behavior):
     def __init__(self, ownerActor: Actor, moveDir: Vector, speed: float) -> None:
         super().__init__(ownerActor)
-        self.moveDir = moveDir.norm()
+        self.moveDir = moveDir.normalize()
         self.speed = speed
 
     def start(self):
@@ -17,15 +17,14 @@ class Mover(Behavior):
         self.owner.startCoroutine(destroyCoroutine, 2)
 
     def update(self, deltaTime: float):
-        self.owner.transform = self.owner.transform.translate(
+        self.owner.relativeTransform = self.owner.relativeTransform.translate(
             self.moveDir * self.speed * deltaTime
         )
 
 
 rectPrefab = PrefabFactory(
-    (RectangleMesh, {"centerOfMass": Vector(0, 0)}),
+    (RectMesh, {"width": 25, "height": 25}),
     (Mover, {"moveDir": Vector(1, 1), "speed": 100}),
-    defaultTransform=Transform(scale=Vector(50, 25)),
 )
 
 
@@ -38,16 +37,16 @@ class Spawner(Behavior):
         def spawn(dt: float) -> float:
             placed = self.owner.world.placeActorFromPrefab(rectPrefab)
             mover = placed.getComponentOfType(Mover)
-            mover.moveDir = Vector(random.uniform(-1, 1), random.uniform(-1, 1)).norm()
+            mover.moveDir = Vector(
+                random.uniform(-1, 1), random.uniform(-1, 1)
+            ).normalize()
             return self.spawnPeriod
 
         spawnCoroutine = Coroutine(spawn)
         self.owner.startCoroutine(spawnCoroutine)
 
 
-spawnerPrefab = PrefabFactory(
-    (Spawner, {"spawnPeriod": 0.1}), defaultTransform=Transform()
-)
+spawnerPrefab = PrefabFactory((Spawner, {"spawnPeriod": 0.1}))
 world = World(deltaTime=0.05)
 world.placeActorFromPrefab(spawnerPrefab)
 
