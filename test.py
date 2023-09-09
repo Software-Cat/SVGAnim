@@ -1,22 +1,47 @@
+import random
 from svganim import *
 
 
-class MyCircle(Circle):
-    def __init__(self, transform: Transform, world: World, **kwargs) -> None:
-        super().__init__(transform, world, r=10, **kwargs)
+class Mover(Behavior):
+    def __init__(self, ownerActor: Actor, moveDir: Vector, speed: float) -> None:
+        super().__init__(ownerActor)
+        self.moveDir = moveDir.norm()
+        self.speed = speed
 
     def update(self, deltaTime: float):
-        self.transform = self.transform.translate(delta=Vector(100, 100) * deltaTime)
+        self.owner.transform = self.owner.transform.translate(
+            self.moveDir * self.speed * deltaTime
+        )
 
 
-class MyManager(Manager):
-    def update(self, deltaTime: float):
-        pass
+ellipsePrefab = PrefabFactory(
+    (EllipseMesh, {"centerOfMass": Vector(0, 0)}),
+    (Mover, {"moveDir": Vector(1, 1), "speed": 100}),
+)
 
 
-world = World()
-world.spawnActor(MyCircle, Transform(Vector(0, 0)))
-world.spawnActor(MyManager, Transform(Vector(0, 0)))
+class Spawner(Behavior):
+    def __init__(self, ownerActor: Actor, spawnPeriod: float) -> None:
+        super().__init__(ownerActor)
+        self.spawnPeriod = spawnPeriod
+
+    def start(self):
+        def spawn(dt: float) -> float:
+            placed = self.owner.world.placeActorFromPrefab(
+                ellipsePrefab, Transform(Vector(0, 0), scale=Vector(25, 25))
+            )
+            mover = placed.getComponentOfType(Mover)
+            mover.moveDir = Vector(random.uniform(-1, 1), random.uniform(-1, 1)).norm()
+            return self.spawnPeriod
+
+        spawnCoroutine = Coroutine(spawn)
+        self.owner.startCoroutine(spawnCoroutine)
+
+
+spawnerPrefab = PrefabFactory((Spawner, {"spawnPeriod": 1}))
+world = World(deltaTime=0.05)
+world.placeActorFromPrefab(spawnerPrefab, Transform(Vector(0, 0)))
+
 
 world.simulateTo(10)
 world.render("test.svg")
