@@ -8,15 +8,24 @@ class Mover(Behavior):
         self.moveDir = moveDir.norm()
         self.speed = speed
 
+    def start(self):
+        def destroySelf(dt) -> float:
+            self.destroyActor(self.owner)
+            return 0
+
+        destroyCoroutine = Coroutine(destroySelf)
+        self.owner.startCoroutine(destroyCoroutine, 2)
+
     def update(self, deltaTime: float):
         self.owner.transform = self.owner.transform.translate(
             self.moveDir * self.speed * deltaTime
         )
 
 
-ellipsePrefab = PrefabFactory(
-    (EllipseMesh, {"centerOfMass": Vector(0, 0)}),
+rectPrefab = PrefabFactory(
+    (RectangleMesh, {"centerOfMass": Vector(0, 0)}),
     (Mover, {"moveDir": Vector(1, 1), "speed": 100}),
+    defaultTransform=Transform(scale=Vector(50, 25)),
 )
 
 
@@ -27,9 +36,7 @@ class Spawner(Behavior):
 
     def start(self):
         def spawn(dt: float) -> float:
-            placed = self.owner.world.placeActorFromPrefab(
-                ellipsePrefab, Transform(Vector(0, 0), scale=Vector(25, 25))
-            )
+            placed = self.owner.world.placeActorFromPrefab(rectPrefab)
             mover = placed.getComponentOfType(Mover)
             mover.moveDir = Vector(random.uniform(-1, 1), random.uniform(-1, 1)).norm()
             return self.spawnPeriod
@@ -38,9 +45,11 @@ class Spawner(Behavior):
         self.owner.startCoroutine(spawnCoroutine)
 
 
-spawnerPrefab = PrefabFactory((Spawner, {"spawnPeriod": 1}))
+spawnerPrefab = PrefabFactory(
+    (Spawner, {"spawnPeriod": 0.1}), defaultTransform=Transform()
+)
 world = World(deltaTime=0.05)
-world.placeActorFromPrefab(spawnerPrefab, Transform(Vector(0, 0)))
+world.placeActorFromPrefab(spawnerPrefab)
 
 
 world.simulateTo(10)
