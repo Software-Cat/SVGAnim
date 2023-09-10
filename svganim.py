@@ -133,29 +133,14 @@ class Transform:
     def scaleMult(self, multiplier: Vector):
         return Transform(self.pos, self.rot, self.scale.matrixprod(multiplier))
 
-    def applyTo(self, other: Self):
-        return Transform(
-            other.pos + self.pos.rotate(math.radians(other.rot)),
-            other.rot + self.rot,
-            other.scale.matrixprod(self.scale),
-        )
-
-
-class Behavior(ABC):
-    def __init__(self, ownerActor: "Actor") -> None:
-        self.owner = ownerActor
-
-    def start(self):
-        pass
-
-    def update(self, deltaTime: float):
-        pass
-
-    def destroyActor(self, actor: "Actor"):
-        self.owner.world.destroyActor(actor)
-
-    def lateUpdate(self, deltaTime: float):
-        pass
+    def applyTo(self, other: Self | Vector):
+        if isinstance(other, Transform):
+            return Transform(
+                other.pos + self.pos.rotate(math.radians(other.rot)),
+                other.rot + self.rot,
+                other.scale.matrixprod(self.scale),
+            )
+        return self.applyTo(Transform(other)).pos
 
 
 class Timeline(ABC, Generic[T]):
@@ -306,6 +291,23 @@ class TransformTimeline(Timeline[Transform]):
         return ""
 
 
+class Behavior(ABC):
+    def __init__(self, ownerActor: "Actor") -> None:
+        self.owner = ownerActor
+
+    def start(self):
+        pass
+
+    def update(self, deltaTime: float):
+        pass
+
+    def destroyActor(self, actor: "Actor"):
+        self.owner.world.destroyActor(actor)
+
+    def lateUpdate(self, deltaTime: float):
+        pass
+
+
 class Mesh(Behavior):
     def __init__(
         self,
@@ -387,6 +389,37 @@ class RectMesh(PolyMesh):
             [Vector(0, 0), Vector(width, 0), Vector(width, height), Vector(0, height)],
             Vector(width / 2, height / 2),
         )
+
+
+class Collider(Behavior):
+    def __init__(
+        self,
+        owner: "Actor",
+        callbacks: list[Callable[[Self], None]] = [],
+        isTrigger=False,
+    ) -> None:
+        self.owner = owner
+        self.callback = callbacks
+        self.isTrigger = isTrigger
+
+    @abstractmethod
+    def checkCollision(self, other: Self) -> bool:
+        pass
+
+
+class PolyCollider(Collider):
+    def __init__(
+        self,
+        owner: "Actor",
+        callbacks: list[Callable[[Self], None]] = [],
+        isTrigger=False,
+        fromMesh=True,  # Todo: implement non from mesh colliders
+    ) -> None:
+        super().__init__(owner, callbacks, isTrigger)
+        self.polyMesh: PolyMesh
+
+    def start(self):
+        self.polyMesh = self.owner.getComponentOfType(PolyMesh)
 
 
 class Actor:
@@ -604,37 +637,6 @@ class World:
         for shape in shapes:
             self.drawing.append(shape)
         self.drawing.save_svg(filename)
-
-
-# Todo: implement colliders
-# class Collider(Behavior):
-#     def __init__(self, owner: Actor, callback: Callable[[Self], None]) -> None:
-#         self.owner = owner
-#         self.callback = callback
-
-#     @abstractmethod
-#     def checkCollision(self, other: Self) -> bool:
-#         pass
-
-
-# class EllipseCollider(Collider):
-#     def __init__(self, radius, *args) -> None:
-#         super().__init__(*args)
-#         self.radius = radius
-
-#     def checkCollision(self, other: Collider) -> bool:
-#         if isinstance(other, EllipseCollider):
-#             centerDist = (
-#                 (self.owner.transform.pos.x - other.owner.transform.pos.x) ** 2
-#                 + (self.owner.transform.pos.y - other.owner.transform.pos.y) ** 2
-#             ) ** 0.5
-#             radiusSep = self.radius + other.radius
-#             return centerDist <= radiusSep
-#         raise NotImplementedError()
-
-
-# class RectangleCollider(Collider):
-#     pass
 
 
 class Coroutine:
