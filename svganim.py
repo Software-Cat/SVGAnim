@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import collections
 import math
-import random
 import drawsvg as draw
 import itertools
 import collision
@@ -134,9 +133,9 @@ class Transform:
     def scaleMult(self, multiplier: Vector):
         return Transform(self.pos, self.rot, self.scale.matrixprod(multiplier))
 
-    def apply(self, other: Self):
+    def applyTo(self, other: Self):
         return Transform(
-            other.pos + self.pos,
+            other.pos + self.pos.rotate(math.radians(other.rot)),
             other.rot + self.rot,
             other.scale.matrixprod(self.scale),
         )
@@ -391,13 +390,8 @@ class RectMesh(PolyMesh):
 
 
 class Actor:
-    def __init__(
-        self,
-        relativeTransform: Transform,
-        world: "World",
-        parent: Optional[Self] = None,
-    ) -> None:
-        self.relativeTransform: Transform = relativeTransform
+    def __init__(self, localTransform: Transform, world: "World") -> None:
+        self.localTransform: Transform = localTransform
         self.world: World = world
         self.absoluteTransformTimeline = TransformTimeline()
         self.lifecycleTimeline = MappedTimeline(
@@ -407,42 +401,45 @@ class Actor:
         )
         self.coroutines: list[Coroutine] = []
         self.components: list[Behavior] = []
+        self.hasStarted = False
 
         self.children: list[Actor] = []
-        self.parent: Optional[Actor] = parent
-        if self.parent:
-            self.parent.children.append(self)
+        self.parent: Optional[Actor] = None
 
     def getAbsoluteTransform(self) -> Transform:
-        transChain = [self.relativeTransform]
+        transChain = [self.localTransform]
         next = self.parent
         while next:
-            transChain.insert(0, next.relativeTransform)
+            transChain.insert(0, next.localTransform)
             next = next.parent
 
-        absoluteTrans = self.world.sceneGraph.relativeTransform
+        absoluteTrans = self.world.sceneGraph.localTransform
         for item in transChain:
-            absoluteTrans = absoluteTrans.apply(item)
+            absoluteTrans = item.applyTo(absoluteTrans)
         return absoluteTrans
 
     def start(self):
-        for behavior in self.components:
-            behavior.start()
-        for child in self.children:
-            child.start()
-        self.lifecycleTimeline.addKeyframe(self.world.time, True)
+        if not self.hasStarted:
+            for behavior in self.components:
+                behavior.start()
+            for child in self.children:
+                child.start()
+            self.lifecycleTimeline.addKeyframe(self.world.time, True)
+            self.hasStarted = True
 
     def onDestroy(self):
         for child in self.children:
             child.onDestroy()
         # Subtraction is a magic correction, not sure why it works but it just does.
-        self.lifecycleTimeline.addKeyframe(self.world.time, False)
+        self.lifecycleTimeline.addKeyframe(
+            self.world.time - self.world.deltaTime * 2, False
+        )
 
     def update(self, deltaTime: float):
         for behavior in self.components:
             behavior.update(deltaTime)
         for c in self.coroutines:
-            c.systemUpdate(self.world.deltaTime)
+            c.update(self.world.deltaTime)
         for child in self.children:
             child.update(deltaTime)
 
@@ -467,10 +464,10 @@ class Actor:
     def startCoroutine(self, cor: "Coroutine", initialDelay: float = 0) -> "Coroutine":
         cor.waitTime = initialDelay
         cor.alreadyWaited = 0
-        cor.ownerActor = self
+        cor.owner = self
         self.coroutines.append(cor)
         # We want to start the coroutine without making it think time passed, hence dt=0
-        cor.systemUpdate(deltaTime=0)
+        cor.update(deltaTime=0)
         return cor
 
     def stopCoroutine(self, cor: "Coroutine"):
@@ -514,7 +511,8 @@ class PrefabFactory:
         if scaleOverride:
             transform = Transform(transform.pos, transform.rot, scaleOverride)
 
-        newActor = Actor(transform, world, parent)
+        newActor = Actor(transform, world)
+        newActor.parent = parent
         for comp, params in self.behaviorParams:
             compInst = comp(newActor, **params)
             newActor.components.append(compInst)
@@ -535,8 +533,8 @@ class World:
         self.width = width
         self.height = height
 
-        self.sceneGraph = Actor(Transform(), self, None)
-        self.destroyedGraph = Actor(Transform(), self, None)
+        self.sceneGraph = Actor(Transform(), self)
+        self.destroyedGraph = Actor(Transform(), self)
 
     def destroyActor(self, actor: Actor):
         if actor.parent:
@@ -544,10 +542,16 @@ class World:
         actor.onDestroy()
         self.destroyedGraph.children.append(actor)
 
-    def placeBuiltActor(self, actor: Actor):
+    def placeBuiltActor(self, actor: Actor, parent: Optional[Actor] = None):
         """Places actor already instantiated from factory into the world"""
+        if parent:
+            parent.children.append(actor)
+            actor.parent = parent
+        else:
+            self.sceneGraph.children.append(actor)
+            actor.parent = self.sceneGraph
+
         actor.start()
-        self.sceneGraph.children.append(actor)
         return actor
 
     def placeActorFromPrefab(
@@ -558,10 +562,11 @@ class World:
         scaleOverride: Optional[Vector] = None,
         parent: Optional[Actor] = None,
     ):
-        """Places actor already instantiated from factory into the world"""
-        newActor = factory.build(self, posOverride, rotOverride, scaleOverride)
-        newActor.parent = parent if parent else self.sceneGraph
-        return self.placeBuiltActor(newActor)
+        """Instantiates instance from factory and place into world"""
+        newActor = factory.build(
+            self, posOverride, rotOverride, scaleOverride, parent=parent
+        )
+        return self.placeBuiltActor(newActor, parent=parent)
 
     def start(self):
         self.sceneGraph.lateUpdate(0)
@@ -637,22 +642,21 @@ class Coroutine:
         self.waitTime: float = 0
         self.alreadyWaited: float = 0
         self.userAsyncUpdateFunction = asyncUpdateFunc
-        self.id = random.randint(0, 1000)
-        self.ownerActor: Actor
+        self.owner: Actor
 
-    def systemAsyncUpdate(self, asyncDeltaTime: float):
+    def asyncUpdate(self, asyncDeltaTime: float):
         """
         Generator function, yields new time to wait.
         asyncDeltaTime: how long was waited since last execution of coroutine.
         """
         return self.userAsyncUpdateFunction(asyncDeltaTime)
 
-    def systemUpdate(self, deltaTime: float):
+    def update(self, deltaTime: float):
         if self.waitTime < 0:
-            self.ownerActor.stopCoroutine(self)
+            self.owner.stopCoroutine(self)
             return
 
         self.alreadyWaited += deltaTime
         if self.alreadyWaited >= self.waitTime:
-            self.waitTime = self.systemAsyncUpdate(self.alreadyWaited)
+            self.waitTime = self.asyncUpdate(self.alreadyWaited)
             self.alreadyWaited = 0
