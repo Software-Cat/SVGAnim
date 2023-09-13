@@ -63,6 +63,7 @@ class Vector:
         return Vector(self.y, -self.x)
 
     def rotate(self, angle: float):
+        """Angle in radians"""
         return Vector(
             self.x * math.cos(angle) - self.y * math.sin(angle),
             self.x * math.sin(angle) + self.y * math.cos(angle),
@@ -111,7 +112,7 @@ class Vector:
     def matrixprod(self, other: Self):
         return Vector(self.x * other.x, self.y * other.y)
 
-    def toCollisionVec(self):
+    def toCollisionRepr(self):
         return collision.Vector(self.x, self.y)
 
 
@@ -133,14 +134,15 @@ class Transform:
     def scaleMult(self, multiplier: Vector):
         return Transform(self.pos, self.rot, self.scale.matrixprod(multiplier))
 
-    def applyTo(self, other: Self | Vector):
-        if isinstance(other, Transform):
-            return Transform(
-                other.pos + self.pos.rotate(math.radians(other.rot)),
-                other.rot + self.rot,
-                other.scale.matrixprod(self.scale),
-            )
-        return self.applyTo(Transform(other)).pos
+    def applyTo(self, other: Self) -> Self:
+        return Transform(
+            other.pos + self.pos.rotate(math.radians(other.rot)),
+            other.rot + self.rot,
+            other.scale.matrixprod(self.scale),
+        )
+
+    def applyToVec(self, other: Vector):
+        return (other.rotate(math.radians(self.rot)) + self.pos).matrixprod(self.scale)
 
 
 class Timeline(ABC, Generic[T]):
@@ -328,18 +330,16 @@ class Mesh(Behavior):
 
 
 class EllipseMesh(Mesh):
-    def __init__(self, ownerActor: "Actor", rx: float = 100, ry: float = 100) -> None:
+    def __init__(
+        self, ownerActor: "Actor", rx: float = 100, ry: float = 100, **kwargs
+    ) -> None:
         super().__init__(ownerActor)
         self.rx = rx
         self.ry = ry
+        self.kwargs = kwargs
 
     def render(self) -> draw.DrawingElement:
-        ellipse = draw.Ellipse(
-            0,
-            0,
-            self.rx,
-            self.ry,
-        )
+        ellipse = draw.Ellipse(0, 0, self.rx, self.ry, **self.kwargs)
 
         self.owner.lifecycleTimeline.extendAnimations(
             ellipse, self, self.owner.world.simulationUpTo
@@ -395,31 +395,55 @@ class Collider(Behavior):
     def __init__(
         self,
         owner: "Actor",
-        callbacks: list[Callable[[Self], None]] = [],
+        callbacks: list[Callable[["Collider", collision.Response], None]] = [],
         isTrigger=False,
     ) -> None:
         self.owner = owner
-        self.callback = callbacks
         self.isTrigger = isTrigger
+        self.callbacks: list[Callable[["Collider", collision.Response], None]] = []
+        self.callbacks.extend(callbacks)
 
     @abstractmethod
-    def checkCollision(self, other: Self) -> bool:
+    def checkCollision(self, other: "Collider") -> bool:
         pass
 
+    @abstractmethod
+    def toCollisionRepr(self) -> collision.Poly | collision.Circle:
+        pass
 
-class PolyCollider(Collider):
+    def onCollide(self, other: "Collider", response: collision.Response):
+        for callback in self.callbacks:
+            callback(other, response)
+        for callback in other.callbacks:
+            callback(self, response)
+
+
+class ConvexPolyCollider(Collider):
     def __init__(
         self,
         owner: "Actor",
-        callbacks: list[Callable[[Self], None]] = [],
+        callbacks: list[Callable[["Collider", collision.Response], None]] = [],
         isTrigger=False,
-        fromMesh=True,  # Todo: implement non from mesh colliders
+        fromMesh=True,  # Todo: implement non from-mesh colliders
     ) -> None:
         super().__init__(owner, callbacks, isTrigger)
         self.polyMesh: PolyMesh
 
     def start(self):
         self.polyMesh = self.owner.getComponentOfType(PolyMesh)
+
+    def toCollisionRepr(self):
+        absTrans = self.owner.getAbsoluteTransform()  # Todo: let scale affect collider
+        return collision.Poly(collision.Vector(0, 0), [absTrans.applyToVec(p).toCollisionRepr() for p in self.polyMesh.points], 0)  # type: ignore
+
+    def checkCollision(self, other: Collider) -> bool:
+        response = collision.Response()
+        hasCollided = collision.collide(
+            self.toCollisionRepr(), other.toCollisionRepr(), response
+        )
+        if hasCollided:
+            self.onCollide(other, response)
+        return hasCollided
 
 
 class Actor:
@@ -515,6 +539,12 @@ class Actor:
     def getComponentsOfType(self, clazz: type[T]) -> list[T]:
         return [comp for comp in self.components if isinstance(comp, clazz)]
 
+    def getComponentsOfTypeInclChildren(self, clazz: type[T]) -> list[T]:
+        totalComps = [comp for comp in self.components if isinstance(comp, clazz)]
+        for child in self.children:
+            totalComps += child.getComponentsOfTypeInclChildren(clazz)
+        return totalComps
+
 
 class PrefabFactory:
     def __init__(
@@ -606,7 +636,16 @@ class World:
 
     def tick(self):
         self.time += self.deltaTime
+
+        # Update
         self.sceneGraph.update(self.deltaTime)
+
+        # Physics tick
+        colliders = self.sceneGraph.getComponentsOfTypeInclChildren(Collider)
+        for a, b in itertools.combinations(colliders, 2):
+            a.checkCollision(b)
+
+        # Late update
         self.sceneGraph.lateUpdate(self.deltaTime)
 
     def simulateTo(self, endTime: float):

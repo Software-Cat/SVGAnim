@@ -1,5 +1,4 @@
 from svganim import *
-from svganim import Actor
 
 
 class Mover(Behavior):
@@ -25,13 +24,31 @@ class Rotor(Behavior):
         )
 
 
+circlePrefab = PrefabFactory((EllipseMesh, {"rx": 10, "ry": 10, "fill": "red"}))
+
+
+class Tracker(Behavior):
+    def start(self):
+        col = self.owner.getComponentOfType(Collider)
+        col.callbacks.append(self.placeTracker)
+
+    def placeTracker(self, oth, res):
+        print(res.overlap_v)
+
+    # def update(self, deltaTime: float):
+    #     points = self.mesh.points
+    #     points = [self.owner.getAbsoluteTransform().applyToVec(p) for p in points]
+    #     for p in points:
+    #         self.owner.world.placeActorFromPrefab(circlePrefab, p)
+
+
 rectPrefab = PrefabFactory(
     (
         RectMesh,
         {"width": 100, "height": 200},
     ),
-    (Mover, {"moveDir": Vector(0, 100)}),
-    defaultTransform=Transform(Vector(-100, -100)),
+    (ConvexPolyCollider, {}),
+    defaultTransform=Transform(Vector(0, 0)),
 )
 
 trianglePrefab = PrefabFactory(
@@ -42,15 +59,15 @@ trianglePrefab = PrefabFactory(
             "points": [Vector(0, 0), Vector(200, 0), Vector(200, 200)],
         },
     ),
-    # (Mover, {"moveDir": Vector(1, 1)}),
+    (ConvexPolyCollider, {}),
     (Rotor, {"speed": 180}),
-    defaultTransform=Transform(Vector(100, 100)),
-    children=[rectPrefab],
+    (Tracker, {}),
+    defaultTransform=Transform(Vector(150, 150)),
 )
-
 
 world = World(deltaTime=1 / 24)
 world.placeActorFromPrefab(trianglePrefab)
+world.placeActorFromPrefab(rectPrefab)
 
 world.simulateTo(10)
 world.render("test.svg")
